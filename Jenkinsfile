@@ -1,0 +1,127 @@
+pipeline {
+    agent any
+
+    options {
+        skipDefaultCheckout(true)
+        disableConcurrentBuilds()
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+
+    environment {
+        APP_IMAGE = "user-service:${BUILD_NUMBER}"
+        MYSQL_DATABASE = "user_db"
+        MYSQL_USER = "app"
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                echo '从 Git 仓库获取项目代码'
+                checkout scm
+            }
+        }
+
+        stage('Environment') {
+            steps {
+                sh 'java -version'
+                sh 'chmod +x mvnw'
+                sh './mvnw -version'
+                sh 'docker version'
+                sh 'docker compose version'
+            }
+        }
+
+        stage('Test and Package') {
+            steps {
+                sh './mvnw -B clean verify'
+            }
+        }
+
+        stage('Archive') {
+            steps {
+                archiveArtifacts(
+                    artifacts: 'target/*.jar',
+                    fingerprint: true,
+                    onlyIfSuccessful: true
+                )
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                sh 'docker build -t "$APP_IMAGE" .'
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                withCredentials([
+                    string(
+                        credentialsId: 'user-service-mysql-root-password',
+                        variable: 'MYSQL_ROOT_PASSWORD'
+                    ),
+                    string(
+                        credentialsId: 'user-service-mysql-password',
+                        variable: 'MYSQL_PASSWORD'
+                    )
+                ]) {
+                    sh '''
+                        set +x
+
+                        APP_IMAGE="$APP_IMAGE" \
+                        MYSQL_ROOT_PASSWORD="$MYSQL_ROOT_PASSWORD" \
+                        MYSQL_DATABASE="$MYSQL_DATABASE" \
+                        MYSQL_USER="$MYSQL_USER" \
+                        MYSQL_PASSWORD="$MYSQL_PASSWORD" \
+                        docker compose up -d --no-build --remove-orphans
+
+                        docker compose ps
+                    '''
+                }
+            }
+        }
+
+        stage('Verify Deployment') {
+            steps {
+                sh '''
+                    for i in $(seq 1 30); do
+                        if docker run --rm \
+                            --network user-service-demo_default \
+                            busybox:1.37 \
+                            wget -qO- http://app:8082/actuator/health
+                        then
+                            echo "应用健康检查成功"
+                            exit 0
+                        fi
+
+                        echo "等待应用启动：第 ${i} 次"
+                        sleep 2
+                    done
+
+                    echo "应用健康检查失败"
+                    docker logs --tail 100 user-service-app || true
+                    exit 1
+                '''
+            }
+        }
+    }
+
+    post {
+        always {
+            junit(
+                testResults: 'target/surefire-reports/*.xml',
+                allowEmptyResults: true
+            )
+        }
+
+        success {
+            echo '测试、打包和部署全部成功'
+        }
+
+        failure {
+            echo '流水线失败，请检查对应阶段日志'
+            sh 'docker logs --tail 100 user-service-app || true'
+        }
+    }
+}
