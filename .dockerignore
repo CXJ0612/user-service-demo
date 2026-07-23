@@ -1,0 +1,13 @@
+.git
+.env
+.idea
+.vscode
+src
+.mvn
+mvnw
+mvnw.cmd
+pom.xml
+*.log
+
+target/*
+!target/*.jar
