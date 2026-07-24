@@ -21,6 +21,9 @@ pipeline {
         APP_NAME = "user-service"
         MYSQL_DATABASE = "user_db"
         MYSQL_USER = "app"
+        DEV_COMPOSE_PROJECT = "user-service-demo"
+        DEV_APP_HOST_PORT = "8082"
+        DEV_MYSQL_HOST_PORT = "3307"
     }
 
     stages {
@@ -106,10 +109,16 @@ pipeline {
                         MYSQL_ROOT_PASSWORD="$MYSQL_ROOT_PASSWORD" \
                         MYSQL_DATABASE="$MYSQL_DATABASE" \
                         MYSQL_USER="$MYSQL_USER" \
+                        APP_HOST_PORT="$DEV_APP_HOST_PORT" \
+                        MYSQL_HOST_PORT="$DEV_MYSQL_HOST_PORT" \
                         MYSQL_PASSWORD="$MYSQL_PASSWORD" \
-                        docker compose up -d --no-build --remove-orphans
+                        docker compose \
+                            -p "$DEV_COMPOSE_PROJECT" \
+                            up -d --no-build --remove-orphans
 
-                        docker compose ps
+                        docker compose \
+                            -p "$DEV_COMPOSE_PROJECT" \
+                            ps
                     '''
                 }
             }
@@ -126,7 +135,7 @@ pipeline {
                 sh '''
                     for i in $(seq 1 30); do
                         if docker run --rm \
-                            --network user-service-demo_default \
+                            --network "${DEV_COMPOSE_PROJECT}_default" \
                             busybox:1.37 \
                             wget -qO- http://app:8082/actuator/health
                         then
@@ -139,7 +148,9 @@ pipeline {
                     done
 
                     echo "应用健康检查失败"
-                    docker logs --tail 100 user-service-app || true
+                    docker compose \
+                        -p "$DEV_COMPOSE_PROJECT" \
+                        logs --tail=100 app || true
                     exit 1
                 '''
             }
@@ -155,12 +166,26 @@ pipeline {
         }
 
         success {
-            echo '测试、打包和部署全部成功'
+            echo "流水线执行成功，操作类型：${params.PIPELINE_ACTION}"
         }
 
         failure {
             echo '流水线失败，请检查对应阶段日志'
-            sh 'docker logs --tail 100 user-service-app || true'
+
+            script {
+                if (
+                    params.PIPELINE_ACTION == 'DEPLOY_DEV' &&
+                    fileExists('compose.yaml')
+                ) {
+                    sh '''
+                        docker compose \
+                            -p "$DEV_COMPOSE_PROJECT" \
+                            logs --tail=100 app || true
+                    '''
+                } else {
+                    echo '本次未执行开发环境部署，跳过应用容器日志收集'
+                }
+            }
         }
     }
 }
