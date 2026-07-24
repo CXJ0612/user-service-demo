@@ -6,10 +6,11 @@ pipeline {
         disableConcurrentBuilds()
         timestamps()
         buildDiscarder(logRotator(numToKeepStr: '10'))
+        timeout(time: 45, unit: 'MINUTES')
     }
 
     environment {
-        APP_IMAGE = "user-service:${BUILD_NUMBER}"
+        APP_NAME = "user-service"
         MYSQL_DATABASE = "user_db"
         MYSQL_USER = "app"
     }
@@ -19,6 +20,24 @@ pipeline {
             steps {
                 echo '从 Git 仓库获取项目代码'
                 checkout scm
+            }
+        }
+
+        stage('Initialize Version') {
+            steps {
+                script {
+                    env.GIT_SHORT_COMMIT = sh(
+                        script: 'git rev-parse --short=8 HEAD',
+                        returnStdout: true
+                    ).trim()
+
+                    env.RELEASE_VERSION = "${env.BUILD_NUMBER}-${env.GIT_SHORT_COMMIT}"
+                    env.APP_IMAGE = "${env.APP_NAME}:${env.RELEASE_VERSION}"
+                }
+
+                echo "Git提交：${env.GIT_SHORT_COMMIT}"
+                echo "发布版本：${env.RELEASE_VERSION}"
+                echo "镜像名称：${env.APP_IMAGE}"
             }
         }
 
