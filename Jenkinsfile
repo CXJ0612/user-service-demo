@@ -9,6 +9,14 @@ pipeline {
         timeout(time: 45, unit: 'MINUTES')
     }
 
+    parameters {
+        choice(
+            name: 'PIPELINE_ACTION',
+            choices: ['BUILD_ONLY', 'DEPLOY_DEV'],
+            description: 'BUILD_ONLY：只测试、打包和构建镜像；DEPLOY_DEV：构建后部署开发环境'
+        )
+    }
+
     environment {
         APP_NAME = "user-service"
         MYSQL_DATABASE = "user_db"
@@ -73,7 +81,13 @@ pipeline {
             }
         }
 
-        stage('Deploy') {
+        stage('Deploy Dev') {
+            when {
+                expression {
+                    params.PIPELINE_ACTION == 'DEPLOY_DEV'
+                }
+            }
+
             steps {
                 withCredentials([
                     string(
@@ -101,7 +115,13 @@ pipeline {
             }
         }
 
-        stage('Verify Deployment') {
+        stage('Verify Dev Deployment') {
+            when {
+                expression {
+                    params.PIPELINE_ACTION == 'DEPLOY_DEV'
+                }
+            }
+
             steps {
                 sh '''
                     for i in $(seq 1 30); do
