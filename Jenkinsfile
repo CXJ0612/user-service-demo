@@ -13,14 +13,19 @@ pipeline {
         choice(
             name: 'PIPELINE_ACTION',
             choices: ['BUILD_ONLY', 'DEPLOY_DEV'],
-            description: 'BUILD_ONLY：只测试、打包和构建镜像；DEPLOY_DEV：构建后部署开发环境'
+            description: 'BUILD_ONLY：测试、打包、构建并推送Harbor；DEPLOY_DEV：推送后从Harbor部署开发环境'
         )
     }
 
     environment {
         APP_NAME = "user-service"
+
+        HARBOR_REGISTRY = "host.docker.internal:8443"
+        HARBOR_PROJECT = "devops-lab"
+
         MYSQL_DATABASE = "user_db"
         MYSQL_USER = "app"
+
         DEV_COMPOSE_PROJECT = "user-service-demo"
         DEV_APP_HOST_PORT = "8082"
         DEV_MYSQL_HOST_PORT = "3307"
@@ -29,7 +34,7 @@ pipeline {
     stages {
         stage('Checkout') {
             steps {
-                echo '从 Git 仓库获取项目代码'
+                echo '从Git仓库获取项目代码'
                 checkout scm
             }
         }
@@ -42,13 +47,20 @@ pipeline {
                         returnStdout: true
                     ).trim()
 
-                    env.RELEASE_VERSION = "${env.BUILD_NUMBER}-${env.GIT_SHORT_COMMIT}"
-                    env.APP_IMAGE = "${env.APP_NAME}:${env.RELEASE_VERSION}"
+                    env.RELEASE_VERSION =
+                        "${env.BUILD_NUMBER}-${env.GIT_SHORT_COMMIT}"
+
+                    env.LOCAL_APP_IMAGE =
+                        "${env.APP_NAME}:${env.RELEASE_VERSION}"
+
+                    env.HARBOR_APP_IMAGE =
+                        "${env.HARBOR_REGISTRY}/${env.HARBOR_PROJECT}/${env.APP_NAME}:${env.RELEASE_VERSION}"
                 }
 
                 echo "Git提交：${env.GIT_SHORT_COMMIT}"
                 echo "发布版本：${env.RELEASE_VERSION}"
-                echo "镜像名称：${env.APP_IMAGE}"
+                echo "本地镜像：${env.LOCAL_APP_IMAGE}"
+                echo "Harbor镜像：${env.HARBOR_APP_IMAGE}"
             }
         }
 
@@ -80,7 +92,43 @@ pipeline {
 
         stage('Build Docker Image') {
             steps {
-                sh 'docker build -t "$APP_IMAGE" .'
+                sh '''
+                    set -eu
+
+                    docker build \
+                        -t "$LOCAL_APP_IMAGE" \
+                        .
+                '''
+            }
+        }
+
+        stage('Push Image to Harbor') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'harbor-devops-lab-robot',
+                        usernameVariable: 'HARBOR_USERNAME',
+                        passwordVariable: 'HARBOR_PASSWORD'
+                    )
+                ]) {
+                    sh '''
+                        set -eu
+                        set +x
+
+                        trap 'docker logout "$HARBOR_REGISTRY" >/dev/null 2>&1 || true' EXIT
+
+                        printf '%s' "$HARBOR_PASSWORD" |
+                            docker login "$HARBOR_REGISTRY" \
+                                --username "$HARBOR_USERNAME" \
+                                --password-stdin
+
+                        docker tag \
+                            "$LOCAL_APP_IMAGE" \
+                            "$HARBOR_APP_IMAGE"
+
+                        docker push "$HARBOR_APP_IMAGE"
+                    '''
+                }
             }
         }
 
@@ -93,6 +141,11 @@ pipeline {
 
             steps {
                 withCredentials([
+                    usernamePassword(
+                        credentialsId: 'harbor-devops-lab-robot',
+                        usernameVariable: 'HARBOR_USERNAME',
+                        passwordVariable: 'HARBOR_PASSWORD'
+                    ),
                     string(
                         credentialsId: 'user-service-mysql-root-password',
                         variable: 'MYSQL_ROOT_PASSWORD'
@@ -103,15 +156,30 @@ pipeline {
                     )
                 ]) {
                     sh '''
+                        set -eu
                         set +x
 
-                        APP_IMAGE="$APP_IMAGE" \
-                        MYSQL_ROOT_PASSWORD="$MYSQL_ROOT_PASSWORD" \
-                        MYSQL_DATABASE="$MYSQL_DATABASE" \
-                        MYSQL_USER="$MYSQL_USER" \
-                        APP_HOST_PORT="$DEV_APP_HOST_PORT" \
-                        MYSQL_HOST_PORT="$DEV_MYSQL_HOST_PORT" \
-                        MYSQL_PASSWORD="$MYSQL_PASSWORD" \
+                        trap 'docker logout "$HARBOR_REGISTRY" >/dev/null 2>&1 || true' EXIT
+
+                        printf '%s' "$HARBOR_PASSWORD" |
+                            docker login "$HARBOR_REGISTRY" \
+                                --username "$HARBOR_USERNAME" \
+                                --password-stdin
+
+                        export APP_IMAGE="$HARBOR_APP_IMAGE"
+                        export MYSQL_ROOT_PASSWORD
+                        export MYSQL_DATABASE
+                        export MYSQL_USER
+                        export MYSQL_PASSWORD
+                        export APP_HOST_PORT="$DEV_APP_HOST_PORT"
+                        export MYSQL_HOST_PORT="$DEV_MYSQL_HOST_PORT"
+
+                        echo "从Harbor拉取开发环境镜像：$APP_IMAGE"
+
+                        docker compose \
+                            -p "$DEV_COMPOSE_PROJECT" \
+                            pull app
+
                         docker compose \
                             -p "$DEV_COMPOSE_PROJECT" \
                             up -d --no-build --remove-orphans
@@ -148,9 +216,11 @@ pipeline {
                     done
 
                     echo "应用健康检查失败"
+
                     docker compose \
                         -p "$DEV_COMPOSE_PROJECT" \
                         logs --tail=100 app || true
+
                     exit 1
                 '''
             }
@@ -167,6 +237,7 @@ pipeline {
 
         success {
             echo "流水线执行成功，操作类型：${params.PIPELINE_ACTION}"
+            echo "Harbor镜像：${env.HARBOR_APP_IMAGE}"
         }
 
         failure {
